@@ -16,13 +16,13 @@ A tool that keeps two Macs in sync. The **target** Mac (MacBook) SSHes into the 
 6. **Additive, never destructive.** Never remove or overwrite target-only items (e.g. SSH keys the user added on the target). Merge `ssh_config`/`known_hosts` entry by entry. Enforce permissions (`~/.ssh` 0700, private keys 0600) on every run.
 7. **Conflicts are the user's call.** If the target already has something that differs from the source, never silently overwrite. Interactive runs show a diff and prompt (keep target / take source / skip). Non-interactive (launchd) runs apply only conflict-free changes, record conflicts as pending, notify, and leave them untouched. `mac-sync resolve` handles pending ones. Detect interactivity (TTY), don't assume.
 8. **No bloat.** Don't copy whole directories like `~/Library`. Don't install background daemons beyond the single launchd agent. Sync small, well-understood pieces of state.
-9. **Safe by default.** Support `--check`/diff. Back up files before overwriting. Never delete from the target unless a role explicitly opts in (e.g. no `brew bundle cleanup` by default).
+9. **Safe by default.** Support `--dry-run` (Ansible `--check --diff`). Back up files before overwriting. Never delete from the target unless a role explicitly opts in (e.g. no `brew bundle cleanup` by default).
 10. **Quiet failure when offline.** An unreachable source is the normal case (laptop is away). The launcher must exit 0 silently, not alert or error.
 
 ## Tech stack
 
 - **Ansible** for applying state (chosen over Go: native SSH, idempotent modules, far less code).
-- **Roles live in this repo; Galaxy is for collections only.** Our roles do capture → stage → apply with conflict prompts and additive-only rules, which generic Galaxy roles can't do, and third-party roles shouldn't sit on the path that handles SSH keys. Take *modules* from Galaxy collections (e.g. `community.general` for `osx_defaults` and `homebrew`) instead of reimplementing them. Pin exact versions in `ansible/requirements.yml`, install into a project-local `collections_path` (set in `ansible.cfg`) so nothing depends on system-wide installs, and have the launcher's first-run bootstrap install them. **Bootstrap:** on first start the launcher installs missing dependencies (Homebrew, Ansible, collections) itself, so the README must not ask users to install them by hand. It always lists what it will install and asks for confirmation; unattended (launchd, no TTY) runs never install anything, they just report what is missing. Don't add Galaxy roles; ask first if one seems worth it.
+- **Roles live in this repo; Galaxy is for collections only.** Our roles do capture → stage → apply with conflict prompts and additive-only rules, which generic Galaxy roles can't do, and third-party roles shouldn't sit on the path that handles SSH keys. Take *modules* from Galaxy collections (e.g. `community.general` for `osx_defaults` and `homebrew`) instead of reimplementing them. Pin exact versions in `ansible/requirements.yml`, install into a project-local `collections_path` (set in `ansible.cfg`) so nothing depends on system-wide installs, and have `mac-sync install` install them. **Dependencies:** `mac-sync install` installs only what is missing (Homebrew, Ansible, collections), so the README must not ask users to install them by hand. It lists what it will install and asks for confirmation, and refuses to run without a TTY. `mac-sync check` is the read-only health check (config, dependencies, SSH). `pull` deliberately does no dependency checks, to stay fast. Don't add Galaxy roles; ask first if one seems worth it.
 - **Python helpers** (`tools/`) for logic Ansible does awkwardly: merging `ssh_config`, diffing `defaults`, conflict handling, custom Ansible modules. Python is preferred because it is a script and can be inspected as-is, unlike compiled binaries (Go) that need decompiling. This matters since the tools touch SSH keys. Use the standard library where possible, keep scripts small, and pin any dependency. Another language is acceptable only when clearly better, and must stay small and readable. No committed binaries.
 - **POSIX-ish shell (zsh/bash)** for the launcher only. Keep it small. If it grows logic, move the logic into Ansible.
 - **launchd** (LaunchAgent in `~/Library/LaunchAgents`) for scheduling, not cron.
@@ -31,7 +31,7 @@ A tool that keeps two Macs in sync. The **target** Mac (MacBook) SSHes into the 
 ## Planned layout
 
 ```
-bin/mac-sync            CLI / launcher (doctor, pull, install-agent, uninstall-agent)
+bin/mac-sync            CLI / launcher (check, install, pull, install-agent, uninstall-agent)
 launchd/                LaunchAgent plist template
 ansible/
   ansible.cfg
@@ -61,10 +61,10 @@ Update this section when the real layout changes.
 
 - Lint: `ansible-lint`, `yamllint`, `shellcheck bin/*`, `ruff` for `tools/`.
 - Syntax: `ansible-playbook --syntax-check ansible/playbook.yml`.
-- Dry run: `ansible-playbook --check --diff ...` (or `bin/mac-sync pull --check`).
+- Dry run: `ansible-playbook --check --diff ...` (or `bin/mac-sync pull --dry-run`).
 - Idempotency: run the playbook twice; the second run must show `changed=0`.
 - To test locally with one machine, point `source.host` at `localhost`.
-- Never run apply steps that modify the user's real system settings without being asked. Prefer `--check`.
+- Never run apply steps that modify the user's real system settings without being asked. Prefer `--dry-run`.
 
 ## Things to ask before doing
 

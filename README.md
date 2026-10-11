@@ -165,18 +165,19 @@ cp config.example.yml config.yml     # set source host, enabled roles
 
 In `config.yml`, set `source.host` to the SSH alias from step 4 (`mac-sync-source`); the user and key then come from your SSH config. See [Configuration](#configuration).
 
-You don't need to install anything else by hand. On first start, the launcher checks for its dependencies (Homebrew, Ansible and the pinned Ansible collections) and installs whatever is missing. It lists what it is about to install and asks for confirmation first; nothing is installed without your approval.
+You don't need to install anything else by hand. `mac-sync install` installs whatever is missing (Homebrew, Ansible and the pinned Ansible collections), and only what is missing. It lists what it is about to install and asks for confirmation first; nothing is installed without your approval, and it never installs when run unattended by the timer.
 
 ### 6. Check, apply, and schedule
 
 ```bash
-./bin/mac-sync doctor                # verify SSH and permissions; offers to install missing dependencies
-./bin/mac-sync pull --check          # dry run: shows what would change, changes nothing
+./bin/mac-sync install               # install missing dependencies (asks first)
+./bin/mac-sync check                 # verify config, dependencies and the SSH connection
+./bin/mac-sync pull --dry-run        # shows what would change, changes nothing
 ./bin/mac-sync pull                  # apply for real (prompts on conflicts)
 ./bin/mac-sync install-agent         # install the launchd timer
 ```
 
-Always run the `--check` dry run first. After `install-agent`, the target syncs on its own whenever the source is reachable; logs go to `~/Library/Logs/mac-sync/`.
+`pull` does no dependency checks, so it starts fast; run `check` whenever something looks wrong. Always do a `--dry-run` first. After `install-agent`, the target syncs on its own whenever the source is reachable; logs go to `~/Library/Logs/mac-sync/`.
 
 ### Away from home
 
@@ -225,7 +226,7 @@ When the source and target disagree about something the target already has (a di
 
 ## Safety
 
-- `--check` mode shows a diff before anything is applied.
+- `--dry-run` mode shows a diff before anything is applied.
 - Files that would be overwritten are backed up first.
 - Nothing is ever deleted from the target unless a role explicitly opts in (for example, `brew bundle cleanup` is off by default).
 - The source is only ever read from.
@@ -256,7 +257,8 @@ CLAUDE.md               instructions for AI coding agents
 - [x] Launcher script with lock, reachability check, logging, confirmed dependency bootstrap
 - [ ] launchd agent install/uninstall
 - [ ] Roles: Homebrew, dotfiles, macOS defaults, VS Code
-- [ ] `doctor` and `--check` dry-run support
+- [x] `check` and `install` commands
+- [ ] `--dry-run` support in roles
 - [ ] Optional roles: mas, terminal profiles, version managers
 - [ ] SSH keys/config role (additive, never committed)
 - [ ] Conflict detection, interactive prompts, `resolve` command

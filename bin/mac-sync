@@ -160,26 +160,6 @@ install_missing() {
   fi
 }
 
-ensure_deps() {
-  check_deps
-  if deps_ok; then return 0; fi
-  if ! is_interactive; then
-    log "Missing dependencies; not installing unattended. Run 'bin/mac-sync doctor' in a terminal."
-    return "$EX_DEPS"
-  fi
-  describe_missing
-  if ! confirm "Install the above?"; then
-    log "Install declined; nothing was changed."
-    return "$EX_DEPS"
-  fi
-  install_missing
-  check_deps
-  if ! deps_ok; then
-    log "Dependencies are still missing after install."
-    return "$EX_DEPS"
-  fi
-}
-
 release_lock() {
   if [ "$LOCK_HELD" = 1 ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
     rm -f "$LOCK_DIR/pid"
@@ -225,7 +205,7 @@ source_reachable() {
 run_playbook() {
   local args
   args=(-i localhost, -c local -e "mac_sync_source=$SOURCE_HOST" "$PLAYBOOK")
-  if [ "$CHECK" = 1 ]; then args+=(--check --diff); fi
+  if [ "$DRY_RUN" = 1 ]; then args+=(--check --diff); fi
   if is_interactive; then
     ANSIBLE_CONFIG="$ANSIBLE_CFG" ansible-playbook "${args[@]}"
   else
@@ -239,7 +219,6 @@ cmd_pull() {
     return 0
   fi
   load_config || return $?
-  ensure_deps || return $?
   if ! source_reachable; then
     log "Source '$SOURCE_HOST' is unreachable (or key auth failed); skipping."
     return 0
@@ -248,7 +227,7 @@ cmd_pull() {
     log "Source reachable, but there is no playbook yet; nothing to apply."
     return 0
   fi
-  if [ "$CHECK" = 1 ]; then
+  if [ "$DRY_RUN" = 1 ]; then
     log "Dry run: comparing with '$SOURCE_HOST'; nothing will be changed."
   else
     log "Syncing from '$SOURCE_HOST'"
@@ -262,44 +241,69 @@ cmd_pull() {
   fi
 }
 
-cmd_doctor() {
+cmd_check() {
   local rc=0 name version
   check_deps
   report() { printf '  %-4s %s\n' "$1" "$2" >&2; }
 
-  if load_config 2>/dev/null; then report ok "config: source.host = $SOURCE_HOST"; else
+  if load_config 2>/dev/null; then
+    report ok "config: source.host = $SOURCE_HOST"
+  else
     report FAIL "config: missing or invalid ($CONFIG)"
     rc=1
   fi
-  if have ssh; then report ok "ssh"; else
+  if have ssh; then
+    report ok "ssh"
+  else
     report FAIL "ssh not found"
     rc=1
   fi
-  if [ "$NEED_BREW" = 1 ]; then report MISS "Homebrew"; elif have brew; then report ok "Homebrew"; else report ok "Homebrew (not needed: Ansible is installed)"; fi
+  if [ "$NEED_BREW" = 1 ]; then
+    report MISS "Homebrew"
+  elif have brew; then
+    report ok "Homebrew"
+  else
+    report ok "Homebrew (not needed: Ansible is installed)"
+  fi
   if [ "$NEED_ANSIBLE" = 1 ]; then report MISS "Ansible"; else report ok "Ansible"; fi
   while read -r name version; do
     [ -n "$name" ] || continue
-    report MISS "collection $name ${version}"
+    report MISS "collection $name $version"
   done <<<"$NEED_COLLECTIONS"
   if ! deps_ok; then rc=1; fi
   if [ -n "$SOURCE_HOST" ] && have ssh; then
-    if source_reachable; then report ok "source reachable over SSH"; else
-      report WARN "source not reachable (normal when away; check SSH setup if unexpected)"
-    fi
-  fi
-
-  if ! deps_ok && is_interactive; then
-    describe_missing
-    if confirm "Install the above?"; then
-      install_missing
-      check_deps
-      if deps_ok; then
-        echo "Dependencies installed." >&2
-        return 0
-      fi
+    if source_reachable; then
+      report ok "source reachable over SSH"
+    else
+      report FAIL "source not reachable over SSH"
+      rc=1
     fi
   fi
   return "$rc"
+}
+
+cmd_install() {
+  check_deps
+  if deps_ok; then
+    echo "Everything is already installed." >&2
+    return 0
+  fi
+  if ! is_interactive; then
+    log "Refusing to install unattended; run 'bin/mac-sync install' in a terminal."
+    return "$EX_DEPS"
+  fi
+  describe_missing
+  if ! confirm "Install the above?"; then
+    echo "Nothing was changed." >&2
+    return "$EX_DEPS"
+  fi
+  install_missing
+  check_deps
+  if ! deps_ok; then
+    log "Dependencies are still missing after install."
+    return "$EX_DEPS"
+  fi
+  echo "Installed." >&2
 }
 
 usage() {
@@ -307,26 +311,29 @@ usage() {
 Usage: mac-sync <command>
 
 Commands:
-  doctor          Check config, SSH and dependencies; offer to install what is
-                  missing (asks first, and only when run in a terminal).
-  pull [--check]  Pull from the source Mac and apply. --check is a dry run.
-  help            Show this help.
+  check             Verify config, SSH connection and dependencies. Read-only.
+  install           Install missing dependencies, after asking. Terminal only.
+  pull [--dry-run]  Pull from the source Mac and apply. Skips dependency checks.
+  help              Show this help.
 EOF
 }
 
 add_brew_to_path
-CHECK=0
+DRY_RUN=0
 cmd="${1:-help}"
 if [ $# -gt 0 ]; then shift; fi
 
 case "$cmd" in
-  doctor)
-    cmd_doctor
+  check)
+    cmd_check
+    ;;
+  install)
+    cmd_install
     ;;
   pull)
     for arg in "$@"; do
       case "$arg" in
-        --check) CHECK=1 ;;
+        --dry-run) DRY_RUN=1 ;;
         *)
           echo "Unknown option: $arg" >&2
           exit "$EX_USAGE"
