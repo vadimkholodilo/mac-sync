@@ -75,28 +75,112 @@ The goal is *as much as is useful, without bloating the system*. Each category i
 
 Syncing uses **allow-lists, not deny-lists**. Nothing moves unless it is named in the config.
 
-## Requirements
+## Getting started
 
-- Two Macs on macOS 13+
-- On the source: *System Settings → General → Sharing → Remote Login* enabled
-- On the target: Homebrew, Python 3, Ansible (`brew install ansible`)
-- SSH key auth from the target to the source (no passwords; the launcher runs unattended)
+Terminology: the **source** is the Mac whose setup you want to copy (your Mac mini). The **target** is the Mac that pulls and applies it (your MacBook). Steps 1-4 are plain SSH setup and work today. Steps 5-6 use the `mac-sync` CLI, which is [not built yet](#roadmap); those commands are the intended interface and may change.
 
-## Quick start
+Requirements: two Macs on macOS 13+, and both on the same network (or connected through a VPN, see [Away from home](#away-from-home)).
 
-> Commands below are the intended interface and may change as the tool takes shape.
+### 1. Enable SSH on the source (Mac mini)
+
+SSH on macOS is called *Remote Login* and is off by default.
+
+**GUI:** *System Settings → General → Sharing → Remote Login* → turn on. Click the (i) button and set *Allow access for* to **Only these users**, then add just your own account.
+
+**Or from the terminal:**
 
 ```bash
-# On the target (MacBook)
+sudo systemsetup -setremotelogin on
+```
+
+(The terminal app needs *Full Disk Access* for this command; otherwise use the GUI.)
+
+Then note the source's address and your username:
+
+```bash
+scutil --get LocalHostName   # e.g. mac-mini  → reachable as mac-mini.local
+whoami                       # e.g. alex
+```
+
+### 2. Generate a dedicated key on the target (MacBook)
+
+Use a key just for `mac-sync` so it can be revoked on its own without affecting anything else.
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/mac_sync_ed25519 -C "mac-sync@$(scutil --get LocalHostName)"
+```
+
+Choose a **passphrase**. The launcher runs unattended, so store the passphrase in the macOS Keychain so it never prompts:
+
+```bash
+ssh-add --apple-use-keychain ~/.ssh/mac_sync_ed25519
+```
+
+(Skipping the passphrase is simpler but means anyone who gets the key file can log in to your Mac mini. Don't do that on a laptop you carry around.)
+
+### 3. Authorise the key on the source
+
+From the target, while password login still works:
+
+```bash
+ssh-copy-id -i ~/.ssh/mac_sync_ed25519.pub alex@mac-mini.local
+```
+
+This appends the public key to `~/.ssh/authorized_keys` on the source. Existing keys there are left alone.
+
+### 4. Add an SSH config entry on the target
+
+Add this to `~/.ssh/config` on the target (create the file if needed; `chmod 600 ~/.ssh/config`):
+
+```sshconfig
+Host mac-sync-source
+  HostName mac-mini.local
+  User alex
+  IdentityFile ~/.ssh/mac_sync_ed25519
+  IdentitiesOnly yes
+  AddKeysToAgent yes
+  UseKeychain yes
+```
+
+`IdentitiesOnly` stops SSH from offering every key you own, and `UseKeychain` lets the passphrase come from the Keychain. The launcher adds `BatchMode=yes` and a short `ConnectTimeout` itself, so you don't need them here.
+
+Test it, and accept the host key when asked (the launcher can't answer that prompt later):
+
+```bash
+ssh mac-sync-source 'echo connected to $(hostname)'
+```
+
+If this prints the source's hostname without asking for a password, SSH is ready.
+
+**Optional hardening on the source:** once key login works, you can disable password login by adding `PasswordAuthentication no` in a new file `/etc/ssh/sshd_config.d/100-mac-sync.conf`. Keep a second terminal logged in while you test so you can't lock yourself out. If the source only needs to accept connections from your home network, prefix the key in its `authorized_keys` with `from="192.168.1.0/24"`.
+
+### 5. Install and configure mac-sync on the target
+
+```bash
 git clone https://github.com/<you>/mac-sync.git ~/git/mac-sync
 cd ~/git/mac-sync
 
-cp config.example.yml config.yml     # set source host, user, enabled roles
-./bin/mac-sync doctor                # check SSH, Ansible, permissions
-./bin/mac-sync pull --check          # dry run, shows what would change
-./bin/mac-sync pull                  # apply for real
+cp config.example.yml config.yml     # set source host, enabled roles
+```
+
+In `config.yml`, set `source.host` to the SSH alias from step 4 (`mac-sync-source`); the user and key then come from your SSH config. See [Configuration](#configuration).
+
+You don't need to install anything else by hand. On first start, the launcher checks for its dependencies (Homebrew, Ansible and the pinned Ansible collections) and installs whatever is missing. It lists what it is about to install and asks for confirmation first; nothing is installed without your approval.
+
+### 6. Check, apply, and schedule
+
+```bash
+./bin/mac-sync doctor                # verify SSH and permissions; offers to install missing dependencies
+./bin/mac-sync pull --check          # dry run: shows what would change, changes nothing
+./bin/mac-sync pull                  # apply for real (prompts on conflicts)
 ./bin/mac-sync install-agent         # install the launchd timer
 ```
+
+Always run the `--check` dry run first. After `install-agent`, the target syncs on its own whenever the source is reachable; logs go to `~/Library/Logs/mac-sync/`.
+
+### Away from home
+
+`mac-mini.local` only resolves on your local network. To sync while travelling, put both Macs on a VPN such as [Tailscale](https://tailscale.com) and use the source's VPN name or IP as `HostName` in step 4. The launcher simply skips a run when the source can't be reached.
 
 ## Configuration
 
@@ -104,9 +188,9 @@ cp config.example.yml config.yml     # set source host, user, enabled roles
 
 ```yaml
 source:
-  host: mac-mini.local        # or a Tailscale name
-  user: vadim
-  ssh_key: ~/.ssh/mac_sync_ed25519
+  host: mac-sync-source       # the Host alias from ~/.ssh/config (see Getting started)
+  # user and key come from that SSH config entry; set `user:` / `ssh_key:`
+  # here only if you connect to a raw hostname instead of an alias
 interval_minutes: 30
 roles:
   homebrew: true
