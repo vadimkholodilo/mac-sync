@@ -12,7 +12,7 @@ A tool that keeps two Macs in sync. The **target** Mac (MacBook) SSHes into the 
 2. **Pull, never push.** The target initiates everything. The source is only ever read from.
 3. **Idempotent.** Running the playbook twice in a row must report zero changes the second time. Prefer real Ansible modules (`community.general.homebrew`, `osx_defaults`, `ansible.builtin.copy`/`synchronize`, `lineinfile`) over `shell`/`command`. If `command` is unavoidable, set `changed_when` and `creates`/`when` correctly.
 4. **Allow-lists, not deny-lists.** Nothing is synced unless explicitly named in config or a role's defaults.
-5. **Secrets are copied, never committed or logged.** SSH keys and `~/.ssh/config` are intentionally synced (the user needs the same keys at home and on the go), but only over the SSH channel, staged in a `0700` temp dir and cleaned up. Never write key material to the repo, logs, fixtures, test output, or `config.yml`. Never commit `config.yml`. Keep `.gitignore` blocking key/config patterns. Keychain items, tokens and `.env` files are not synced at all.
+5. **Secrets are copied, never committed or logged.** SSH keys and `~/.ssh/config` are intentionally synced (the user needs the same keys at home and on the go), but only over the SSH channel, staged in a `0700` temp dir and cleaned up. Never write key material to the repo, logs, or `config.yml`. Never commit `config.yml`. Keep `.gitignore` blocking key/config patterns. Keychain items, tokens and `.env` files are not synced at all.
 6. **Additive, never destructive.** Never remove or overwrite target-only items (e.g. SSH keys the user added on the target). Merge `ssh_config`/`known_hosts` entry by entry. Enforce permissions (`~/.ssh` 0700, private keys 0600) on every run.
 7. **Conflicts are the user's call.** If the target already has something that differs from the source, never silently overwrite. Interactive runs show a diff and prompt (keep target / take source / skip). Non-interactive (launchd) runs apply only conflict-free changes, record conflicts as pending, notify, and leave them untouched. `mac-sync resolve` handles pending ones. Detect interactivity (TTY), don't assume.
 8. **No bloat.** Don't copy whole directories like `~/Library`. Don't install background daemons beyond the single launchd agent. Sync small, well-understood pieces of state.
@@ -51,15 +51,15 @@ Update this section when the real layout changes.
 - Variables are namespaced by role (`homebrew_*`, `dotfiles_*`).
 - `macos_defaults` syncs only an allow-listed set of domain/key pairs. Never export entire domains blindly, since they contain machine-specific values.
 - Launcher requirements: lock file to prevent overlap, SSH with `BatchMode=yes` and a short `ConnectTimeout`, log to `~/Library/Logs/mac-sync/`, optional notification only on genuine apply failures.
-- **Comments only when absolutely required. The code is the spec.** Make code self-explanatory through naming, small functions and clear structure instead of annotating it. Never write comments that restate what the code does, narrate steps, or label sections. The only acceptable comments are a non-obvious *why* that the code cannot express (a security reason, a macOS quirk, a deliberate trade-off such as using `accept-new` rather than disabling host-key checking). Before adding one, try renaming or extracting instead. Do not leave commented-out code. This applies to shell, Python and YAML alike; the same goes for tests, where test names state the behaviour.
+- **Comments only when absolutely required. The code is the spec.** Make code self-explanatory through naming, small functions and clear structure instead of annotating it. Never write comments that restate what the code does, narrate steps, or label sections. The only acceptable comments are a non-obvious *why* that the code cannot express (a security reason, a macOS quirk, a deliberate trade-off such as using `accept-new` rather than disabling host-key checking). Before adding one, try renaming or extracting instead. Do not leave commented-out code. This applies to shell, Python and YAML alike.
 - YAML: 2-space indent, named tasks, `ansible-lint` clean.
 - Shell: `set -euo pipefail`, quote everything, `shellcheck` clean.
 
 ## Testing and verification
 
-You cannot fully test this without two Macs, so be explicit about what was and wasn't verified.
+**No automated test suite, by design.** Behaviour depends on the user's personal setup, so the reliable test is a real run on the real Macs. Do not add unit tests, mocks or fake-command harnesses. Be explicit about what was and wasn't verified.
 
-- Lint: `ansible-lint`, `yamllint`, `shellcheck bin/*`, `ruff` and `pytest` for `tools/`. Test helpers against fake keys generated into a temp dir, never real ones.
+- Lint: `ansible-lint`, `yamllint`, `shellcheck bin/*`, `ruff` for `tools/`.
 - Syntax: `ansible-playbook --syntax-check ansible/playbook.yml`.
 - Dry run: `ansible-playbook --check --diff ...` (or `bin/mac-sync pull --check`).
 - Idempotency: run the playbook twice; the second run must show `changed=0`.
