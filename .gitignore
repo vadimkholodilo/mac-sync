@@ -1,0 +1,11 @@
+# Personal config and anything secret-shaped must never be committed.
+config.yml
+ansible/collections/
+*.log
+.DS_Store
+
+id_*
+*_ed25519
+*_rsa
+*.pem
+*.key

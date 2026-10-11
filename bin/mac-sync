@@ -1,0 +1,346 @@
+#!/bin/bash
+# Targets the macOS system bash (3.2): no associative arrays, no mapfile.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CONFIG="${MAC_SYNC_CONFIG:-$ROOT/config.yml}"
+REQUIREMENTS="$ROOT/ansible/requirements.yml"
+PLAYBOOK="$ROOT/ansible/playbook.yml"
+ANSIBLE_CFG="$ROOT/ansible/ansible.cfg"
+COLLECTIONS_DIR="$ROOT/ansible/collections"
+LOG_DIR="${MAC_SYNC_LOG_DIR:-$HOME/Library/Logs/mac-sync}"
+STATE_DIR="${MAC_SYNC_STATE_DIR:-$HOME/Library/Application Support/mac-sync}"
+LOG_FILE="$LOG_DIR/mac-sync.log"
+LOCK_DIR="$STATE_DIR/lock"
+BREW_DIRS="${MAC_SYNC_BREW_DIRS-/opt/homebrew/bin /usr/local/bin}"
+HOMEBREW_INSTALL_URL="https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
+LOG_MAX_BYTES=1048576
+
+EX_USAGE=64
+EX_CONFIG=2
+EX_DEPS=3
+
+SOURCE_HOST=""
+LOCK_HELD=0
+NEED_BREW=0
+NEED_ANSIBLE=0
+NEED_COLLECTIONS=""
+
+log() {
+  if mkdir -p "$LOG_DIR" 2>/dev/null; then
+    if [ -f "$LOG_FILE" ] && [ "$(wc -c <"$LOG_FILE")" -gt "$LOG_MAX_BYTES" ]; then
+      mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
+    fi
+    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG_FILE" 2>/dev/null || true
+  fi
+  if [ -t 2 ]; then
+    printf '%s\n' "$*" >&2
+  fi
+}
+
+is_interactive() { [ -t 0 ] && [ -t 1 ]; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+confirm() {
+  local reply
+  printf '%s [y/N] ' "$1" >&2
+  IFS= read -r reply || return 1
+  case "$reply" in
+    y | Y | yes | YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# launchd starts with a minimal PATH; append (never prepend) the Homebrew dirs.
+add_brew_to_path() {
+  local d
+  for d in $BREW_DIRS; do
+    if [ -d "$d" ]; then
+      case ":$PATH:" in
+        *":$d:"*) ;;
+        *) PATH="$PATH:$d" ;;
+      esac
+    fi
+  done
+  export PATH
+}
+
+# Minimal parser: only the documented `source:` / `  host:` shape.
+load_config() {
+  if [ ! -f "$CONFIG" ]; then
+    log "No config at $CONFIG. Copy config.example.yml to config.yml and edit it."
+    return "$EX_CONFIG"
+  fi
+  SOURCE_HOST="$(awk '
+    /^source:/ { in_source = 1; next }
+    /^[^[:space:]#]/ { in_source = 0 }
+    in_source && $1 == "host:" { print $2; exit }
+  ' "$CONFIG" | tr -d "\"'")"
+  if [ -z "$SOURCE_HOST" ]; then
+    log "config.yml has no source.host."
+    return "$EX_CONFIG"
+  fi
+  if ! [[ $SOURCE_HOST =~ ^[A-Za-z0-9][A-Za-z0-9._@:-]*$ ]]; then
+    log "source.host '$SOURCE_HOST' is not a valid host name or SSH alias."
+    return "$EX_CONFIG"
+  fi
+}
+
+pinned_collections() {
+  [ -f "$REQUIREMENTS" ] || return 0
+  awk '
+    BEGIN { q = sprintf("%c", 39) }
+    /^[[:space:]]*-[[:space:]]*name:/ {
+      if (n != "") print n, v
+      n = $NF; v = ""; gsub("[\"" q "]", "", n); next
+    }
+    /^[[:space:]]*version:/ { v = $NF; gsub("[\"" q "]", "", v) }
+    END { if (n != "") print n, v }
+  ' "$REQUIREMENTS"
+}
+
+collection_installed() {
+  local ns="${1%%.*}" name="${1#*.}" manifest installed
+  manifest="$COLLECTIONS_DIR/ansible_collections/$ns/$name/MANIFEST.json"
+  [ -f "$manifest" ] || return 1
+  [ -n "${2:-}" ] || return 0
+  installed="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1)"
+  [ "$installed" = "$2" ]
+}
+
+check_deps() {
+  NEED_BREW=0
+  NEED_ANSIBLE=0
+  NEED_COLLECTIONS=""
+  local name version
+  if ! have ansible-playbook || ! have ansible-galaxy; then
+    NEED_ANSIBLE=1
+    if ! have brew; then NEED_BREW=1; fi
+  fi
+  while read -r name version; do
+    [ -n "$name" ] || continue
+    if ! collection_installed "$name" "$version"; then
+      NEED_COLLECTIONS="${NEED_COLLECTIONS}${name} ${version}"$'\n'
+    fi
+  done < <(pinned_collections)
+}
+
+deps_ok() { [ "$NEED_BREW" = 0 ] && [ "$NEED_ANSIBLE" = 0 ] && [ -z "$NEED_COLLECTIONS" ]; }
+
+describe_missing() {
+  local name version
+  echo "Missing dependencies:" >&2
+  if [ "$NEED_BREW" = 1 ]; then
+    echo "  - Homebrew (runs the official installer: $HOMEBREW_INSTALL_URL)" >&2
+  fi
+  if [ "$NEED_ANSIBLE" = 1 ]; then
+    echo "  - Ansible (brew install ansible)" >&2
+  fi
+  while read -r name version; do
+    [ -n "$name" ] || continue
+    echo "  - Ansible collection $name ${version:+$version }(into $COLLECTIONS_DIR)" >&2
+  done <<<"$NEED_COLLECTIONS"
+}
+
+install_missing() {
+  if [ "$NEED_BREW" = 1 ]; then
+    log "Installing Homebrew"
+    /bin/bash -c "$(curl -fsSL "$HOMEBREW_INSTALL_URL")"
+    add_brew_to_path
+  fi
+  if [ "$NEED_ANSIBLE" = 1 ]; then
+    log "Installing Ansible"
+    brew install ansible
+  fi
+  if [ -n "$NEED_COLLECTIONS" ]; then
+    log "Installing Ansible collections"
+    mkdir -p "$COLLECTIONS_DIR"
+    ansible-galaxy collection install -r "$REQUIREMENTS" -p "$COLLECTIONS_DIR"
+  fi
+}
+
+ensure_deps() {
+  check_deps
+  if deps_ok; then return 0; fi
+  if ! is_interactive; then
+    log "Missing dependencies; not installing unattended. Run 'bin/mac-sync doctor' in a terminal."
+    return "$EX_DEPS"
+  fi
+  describe_missing
+  if ! confirm "Install the above?"; then
+    log "Install declined; nothing was changed."
+    return "$EX_DEPS"
+  fi
+  install_missing
+  check_deps
+  if ! deps_ok; then
+    log "Dependencies are still missing after install."
+    return "$EX_DEPS"
+  fi
+}
+
+release_lock() {
+  if [ "$LOCK_HELD" = 1 ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$LOCK_DIR/pid"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
+}
+
+lock_is_stale() {
+  local pid
+  pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  if [ -z "$pid" ]; then
+    # Owner may be between mkdir and writing its pid; only call it stale if old.
+    [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +60 2>/dev/null)" ]
+    return
+  fi
+  kill -0 "$pid" 2>/dev/null || return 0
+  # The pid may have been reused by an unrelated process after a reboot.
+  ! ps -p "$pid" -o command= 2>/dev/null | grep -q 'mac-sync'
+}
+
+acquire_lock() {
+  mkdir -p "$STATE_DIR"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    if ! lock_is_stale; then return 1; fi
+    log "Removing stale lock"
+    rm -f "$LOCK_DIR/pid"
+    rmdir "$LOCK_DIR" 2>/dev/null || return 1
+    mkdir "$LOCK_DIR" 2>/dev/null || return 1
+  fi
+  LOCK_HELD=1
+  printf '%s\n' "$$" >"$LOCK_DIR/pid"
+  trap release_lock EXIT
+}
+
+# accept-new records an unknown host key but still refuses a changed one,
+# which protects the SSH keys we copy from interception.
+source_reachable() {
+  ssh -o BatchMode=yes -o ConnectTimeout=5 -o ConnectionAttempts=1 \
+    -o StrictHostKeyChecking=accept-new -- "$SOURCE_HOST" true \
+    </dev/null >/dev/null 2>&1
+}
+
+run_playbook() {
+  local args
+  args=(-i localhost, -c local -e "mac_sync_source=$SOURCE_HOST" "$PLAYBOOK")
+  if [ "$CHECK" = 1 ]; then args+=(--check --diff); fi
+  if is_interactive; then
+    ANSIBLE_CONFIG="$ANSIBLE_CFG" ansible-playbook "${args[@]}"
+  else
+    ANSIBLE_CONFIG="$ANSIBLE_CFG" ansible-playbook "${args[@]}" >>"$LOG_FILE" 2>&1
+  fi
+}
+
+cmd_pull() {
+  if ! acquire_lock; then
+    log "Another mac-sync run is in progress; skipping."
+    return 0
+  fi
+  load_config || return $?
+  ensure_deps || return $?
+  if ! source_reachable; then
+    log "Source '$SOURCE_HOST' is unreachable (or key auth failed); skipping."
+    return 0
+  fi
+  if [ ! -f "$PLAYBOOK" ]; then
+    log "Source reachable, but there is no playbook yet; nothing to apply."
+    return 0
+  fi
+  if [ "$CHECK" = 1 ]; then
+    log "Dry run: comparing with '$SOURCE_HOST'; nothing will be changed."
+  else
+    log "Syncing from '$SOURCE_HOST'"
+  fi
+  if run_playbook; then
+    log "Sync finished."
+  else
+    local rc=$?
+    log "Sync FAILED (ansible-playbook exit $rc). See $LOG_FILE."
+    return "$rc"
+  fi
+}
+
+cmd_doctor() {
+  local rc=0 name version
+  check_deps
+  report() { printf '  %-4s %s\n' "$1" "$2" >&2; }
+
+  if load_config 2>/dev/null; then report ok "config: source.host = $SOURCE_HOST"; else
+    report FAIL "config: missing or invalid ($CONFIG)"
+    rc=1
+  fi
+  if have ssh; then report ok "ssh"; else
+    report FAIL "ssh not found"
+    rc=1
+  fi
+  if [ "$NEED_BREW" = 1 ]; then report MISS "Homebrew"; elif have brew; then report ok "Homebrew"; else report ok "Homebrew (not needed: Ansible is installed)"; fi
+  if [ "$NEED_ANSIBLE" = 1 ]; then report MISS "Ansible"; else report ok "Ansible"; fi
+  while read -r name version; do
+    [ -n "$name" ] || continue
+    report MISS "collection $name ${version}"
+  done <<<"$NEED_COLLECTIONS"
+  if ! deps_ok; then rc=1; fi
+  if [ -n "$SOURCE_HOST" ] && have ssh; then
+    if source_reachable; then report ok "source reachable over SSH"; else
+      report WARN "source not reachable (normal when away; check SSH setup if unexpected)"
+    fi
+  fi
+
+  if ! deps_ok && is_interactive; then
+    describe_missing
+    if confirm "Install the above?"; then
+      install_missing
+      check_deps
+      if deps_ok; then
+        echo "Dependencies installed." >&2
+        return 0
+      fi
+    fi
+  fi
+  return "$rc"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: mac-sync <command>
+
+Commands:
+  doctor          Check config, SSH and dependencies; offer to install what is
+                  missing (asks first, and only when run in a terminal).
+  pull [--check]  Pull from the source Mac and apply. --check is a dry run.
+  help            Show this help.
+EOF
+}
+
+add_brew_to_path
+CHECK=0
+cmd="${1:-help}"
+if [ $# -gt 0 ]; then shift; fi
+
+case "$cmd" in
+  doctor)
+    cmd_doctor
+    ;;
+  pull)
+    for arg in "$@"; do
+      case "$arg" in
+        --check) CHECK=1 ;;
+        *)
+          echo "Unknown option: $arg" >&2
+          exit "$EX_USAGE"
+          ;;
+      esac
+    done
+    cmd_pull
+    ;;
+  help | -h | --help)
+    usage
+    ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    usage >&2
+    exit "$EX_USAGE"
+    ;;
+esac

@@ -1,0 +1,13 @@
+# Copy to config.yml (git-ignored) and edit.
+source:
+  host: mac-sync-source       # the Host alias from ~/.ssh/config (see README)
+interval_minutes: 30
+roles:
+  homebrew: true
+  dotfiles: true
+  macos_defaults: true
+  vscode: true
+  mas: false
+dotfiles:
+  - .zshrc
+  - .gitconfig
