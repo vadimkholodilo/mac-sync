@@ -144,7 +144,7 @@ Host mac-sync-source
 
 `IdentitiesOnly` stops SSH from offering every key you own, and `UseKeychain` lets the passphrase come from the Keychain. The launcher adds `BatchMode=yes` and a short `ConnectTimeout` itself, so you don't need them here.
 
-Test it, and accept the host key when asked (the launcher can't answer that prompt later):
+Test it. The first connection records the source's host key (mac-sync uses `StrictHostKeyChecking=accept-new`, so it never prompts, but it still refuses if that key later *changes*):
 
 ```bash
 ssh mac-sync-source 'echo connected to $(hostname)'
@@ -253,7 +253,7 @@ CLAUDE.md               instructions for AI coding agents
 
 ## Roadmap
 
-- [ ] Launcher script with lock, reachability check, logging
+- [x] Launcher script with lock, reachability check, logging, confirmed dependency bootstrap
 - [ ] launchd agent install/uninstall
 - [ ] Roles: Homebrew, dotfiles, macOS defaults, VS Code
 - [ ] `doctor` and `--check` dry-run support

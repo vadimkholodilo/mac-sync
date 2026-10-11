@@ -51,6 +51,7 @@ Update this section when the real layout changes.
 - Variables are namespaced by role (`homebrew_*`, `dotfiles_*`).
 - `macos_defaults` syncs only an allow-listed set of domain/key pairs. Never export entire domains blindly, since they contain machine-specific values.
 - Launcher requirements: lock file to prevent overlap, SSH with `BatchMode=yes` and a short `ConnectTimeout`, log to `~/Library/Logs/mac-sync/`, optional notification only on genuine apply failures.
+- **Comments only when absolutely required. The code is the spec.** Make code self-explanatory through naming, small functions and clear structure instead of annotating it. Never write comments that restate what the code does, narrate steps, or label sections. The only acceptable comments are a non-obvious *why* that the code cannot express (a security reason, a macOS quirk, a deliberate trade-off such as using `accept-new` rather than disabling host-key checking). Before adding one, try renaming or extracting instead. Do not leave commented-out code. This applies to shell, Python and YAML alike; the same goes for tests, where test names state the behaviour.
 - YAML: 2-space indent, named tasks, `ansible-lint` clean.
 - Shell: `set -euo pipefail`, quote everything, `shellcheck` clean.
 
